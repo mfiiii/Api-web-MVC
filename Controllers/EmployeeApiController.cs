@@ -7,6 +7,7 @@ using myappmvc.DTOs;
 using Microsoft.AspNetCore.OData.Query;
 using log4net;
 using myappmvc.Interfaces;
+using myappmvc.LogEventArgs;
 
 namespace myappmvc.Controllers
 {
@@ -14,41 +15,77 @@ namespace myappmvc.Controllers
     [ApiController]
     public class EmployeeApiController : ControllerBase
     {
-        private readonly ApplicationDbContext _context;
-        private readonly ILog _logger;
-        private readonly IRedisCacheService _cache;
+        private readonly ApplicationDbContext _context; // làm việc với database    
+        private readonly ILoggerService _logger;// Log4Net logger
+        private readonly IRedisCacheService _cache;// Redis cache 
+        private readonly EventBasedLogger _eventLogger; // Sử dụng EventBasedLogger để ghi log sự kiện
 
-
-
-        public EmployeeApiController(ApplicationDbContext context, IRedisCacheService cache)
+        // Dependency injection(DI) cho DbContext + Redis.
+        public EmployeeApiController(ApplicationDbContext context, IRedisCacheService cache, ILoggerService logger, EventBasedLogger eventLogger)
         {
             _context = context;
             _cache = cache;
-            _logger = LogManager.GetLogger(typeof(EmployeeApiController)); // Log4Net logger
+            _logger = logger;
+            _eventLogger = eventLogger;
         }
-      
 
-        [EnableQuery]
+
+
+       /* public async Task Example()
+        {
+            Console.WriteLine("Start");
+            await Task.Delay(2000);
+            Console.WriteLine("End");
+       */
+
+            /*      
+            private static int _check = 0;
+
+                  [HttpGet("check-logger-singleton")]
+                  public IActionResult CheckLoggerSingleton()
+                  {
+                      int checksingleton = _logger.GetHashCode();
+                      var myClass1 = new MyClass() { id = 1 };
+                      var myClass2 = new MyClass() { id = 2 };
+
+                      if (_check == 0)
+                      {
+                          _check = checksingleton;
+                          return Ok(new { Message = "First check", Logger = checksingleton });
+                      }
+                      else
+                      {
+                          bool isSingleton = _check == checksingleton;
+                          return Ok(new { Message = "Subsequent check", Logger= checksingleton, IsSingleton = isSingleton });
+                      }
+                  }
+                */
+
+
+
+
+
+            [EnableQuery]
         [HttpGet]
         public async Task<ActionResult<IEnumerable<EmployeeDTO>>> GetEmployees()
         {
-            _logger.Info("Get all employees");
+            _logger.Info(this, "Event: Get all employees");
 
             try
             {
                 const string cacheKey = "employee_list";
 
-                var cached = await _cache.GetAsync<List<EmployeeDTO>>(cacheKey);
+                var cached = await _cache.GetAsync<List<EmployeeDTO>>(cacheKey); // lấy danh sách nhân viên từ cache
                 if (cached != null)
                 {
-                    _logger.Info("Returned employees from cache.");
-                    return Ok(cached);
+                    _logger.Info(this, "Event: Returned employees from cache.");
+                    return Ok(cached); // trả về danh sách nhân viên từ cache
                 }
 
 
 
                 var employees = await _context.Employees
-                    .Include(e => e.Department)
+                    .Include(e => e.Department) // lấy thông tin phòng ban
                     .Select(e => new EmployeeDTO
                     {
                         Id = e.Id,
@@ -62,22 +99,25 @@ namespace myappmvc.Controllers
                         } : null
                     })
                     .ToListAsync();
-                await _cache.SetAsync(cacheKey, employees, TimeSpan.FromMinutes(10));
+                await _cache.SetAsync(cacheKey, employees, TimeSpan.FromMinutes(10)); // cache kết quả, tồn tại 10 phút
 
-                _logger.Info($"Returned {employees.Count} employees.");
+                _logger.Info(this, $"Returned {employees.Count} employees.");
                 return Ok(employees);
             }
             catch (Exception ex)
             {
-                _logger.Error("Error getting employees", ex);
+                _logger.Info(this, $"Error getting employees: {ex.Message}");
+                _logger.Error(this,"Error getting employees", ex);
+                // Vẫn ghi log bằng log4net cho trường hợp lỗi
                 return StatusCode(500, "Internal server error");
             }
         }
 
+
         [HttpGet("{id}")]
         public async Task<ActionResult<EmployeeDTO>> GetEmployee(int id)
         {
-            _logger.Info($"Get employee with ID {id}");
+            _logger.Info(this, $"Get employee with ID {id}"); // Ghi log sự kiện lấy nhân viên theo ID
 
             try
             {
@@ -87,7 +127,7 @@ namespace myappmvc.Controllers
 
                 if (employee == null)
                 {
-                    _logger.Warn($"Employee with ID {id} not found");
+                    _logger.Warn(this,$"Employee with ID {id} not found");
                     return NotFound();
                 }
 
@@ -103,12 +143,13 @@ namespace myappmvc.Controllers
                         Name = employee.Department.Name
                     } : null
                 };
+                _logger.Info(this, $"Employee with ID {id} found"); // Ghi log sự kiện thành công khi tìm thấy nhân viên
 
                 return Ok(dto);
             }
             catch (Exception ex)
             {
-                _logger.Error($"Error getting employee with ID {id}", ex);
+                _logger.Error(this, $"Error getting employee with ID {id}", ex); // Sử dụng log4net để ghi log lỗi chi tiết
                 return StatusCode(500, "Internal server error");
             }
         }
@@ -116,17 +157,17 @@ namespace myappmvc.Controllers
         [HttpPost]
         public async Task<ActionResult<EmployeeDTO>> CreateEmployee([FromBody] CreateEmployeeDTO dto)
         {
-            _logger.Info("Creating a new employee");
+            _logger.Info(this, "Creating a new employee");
 
             if (dto == null)
             {
-                _logger.Warn("Received null DTO");
+                _logger.Warn(this, "Received null DTO");
                 return BadRequest(new { message = "Invalid data." });
             }
 
             try
             {
-                Department? department = null;
+                Department? department = null; 
 
                 if (dto.Department != null)
                 {
@@ -135,10 +176,12 @@ namespace myappmvc.Controllers
                         department = await _context.Departments.FindAsync(dto.Department.Id);
                         if (department == null)
                         {
-                            _logger.Warn($"Department ID {dto.Department.Id} not found");
+                            _logger.Warn(this, $"Department ID {dto.Department.Id} not found");
                             return BadRequest(new { message = "Department not found." });
                         }
                     }
+
+                    // nếu department không có ID thì thêm mới department
                     else if (!string.IsNullOrWhiteSpace(dto.Department.Name))
                     {
                         department = new Department { Name = dto.Department.Name };
@@ -157,11 +200,13 @@ namespace myappmvc.Controllers
 
                 _context.Employees.Add(employee);
                 await _context.SaveChangesAsync();
+
+                // Xóa cache sau khi thêm nhân viên mới
                 await _cache.RemoveAsync("employee_list");
-                _logger.Info("Employee list cache removed from Redis after deletion.");
+                _logger.Info(this, "Employee list cache removed from Redis after deletion.");
 
 
-                _logger.Info($"Employee created with ID {employee.Id}");
+                _logger.Info(this, $"Employee created with ID {employee.Id}");
 
                 return CreatedAtAction(nameof(GetEmployee), new { id = employee.Id }, new EmployeeDTO
                 {
@@ -175,19 +220,19 @@ namespace myappmvc.Controllers
             }
             catch (Exception ex)
             {
-                _logger.Error("Error creating employee", ex);
+                _logger.Error(this, "Error creating employee", ex);
                 return StatusCode(500, "Internal server error");
             }
         }
 
         [HttpPatch("{id}")]
-        public async Task<IActionResult> UpdateEmployee(int id, [FromBody] CreateEmployeeDTO dto)
+        public async Task<IActionResult> UpdateEmployee(int id, [FromBody] UpdateEmployeeDTO dto)
         {
-            _logger.Info($"Updating employee with ID {id}");
+            _logger.Info(this, $"Updating employee with ID {id}");
 
             if (dto == null)
             {
-                _logger.Warn("Received null DTO for UpdateEmployee");
+                _logger.Warn(this, "Received null DTO for UpdateEmployee");
                 return BadRequest(new { message = "Invalid data." });
             }
 
@@ -196,7 +241,7 @@ namespace myappmvc.Controllers
                 var employee = await _context.Employees.FindAsync(id);
                 if (employee == null)
                 {
-                    _logger.Warn($"Employee with ID {id} not found");
+                    _logger.Warn(this, $"Employee with ID {id} not found");
                     return NotFound();
                 }
 
@@ -208,7 +253,7 @@ namespace myappmvc.Controllers
                         department = await _context.Departments.FindAsync(dto.Department.Id);
                         if (department == null)
                         {
-                            _logger.Warn($"Department ID {dto.Department.Id} not found");
+                            _logger.Warn(this, $"Department ID {dto.Department.Id} not found");
                             return BadRequest(new { message = "Department not found." });
                         }
                     }
@@ -220,9 +265,13 @@ namespace myappmvc.Controllers
                     }
                 }
 
-                employee.Name = dto.Name ?? employee.Name;
-                employee.Position = dto.Position ?? employee.Position;
-                employee.Salary = dto.Salary != 0 ? dto.Salary : employee.Salary;
+                employee.Name = !string.IsNullOrWhiteSpace(dto.Name) ? dto.Name : employee.Name;
+                employee.Position = !string.IsNullOrWhiteSpace(dto.Position) ? dto.Position : employee.Position;
+
+                if (dto.Salary.HasValue && dto.Salary.Value > 0)
+                {
+                    employee.Salary = dto.Salary.Value;
+                }
                 employee.Department = department ?? employee.Department;
 
                 await _context.SaveChangesAsync();
@@ -230,7 +279,7 @@ namespace myappmvc.Controllers
 
 
 
-                _logger.Info($"Employee with ID {id} updated");
+                _logger.Info(this, $"Employee with ID {id} updated");
 
                 return Ok(new EmployeeDTO
                 {
@@ -244,22 +293,22 @@ namespace myappmvc.Controllers
             }
             catch (Exception ex)
             {
-                _logger.Error($"Error updating employee with ID {id}", ex);
-                return StatusCode(500, "Internal server error");
+                _logger.Error(this, $"Error updating employee with ID {id}: {ex.Message}", ex); // Thêm .Message
+                return StatusCode(500, $"Internal server error: {ex.Message}");
             }
         }
 
         [HttpDelete("{id}")]
         public async Task<IActionResult> DeleteEmployee(int id)
         {
-            _logger.Info($"Deleting employee with ID {id}");
+            _logger.Info(this, $"Deleting employee with ID {id}");
 
             try
             {
                 var employee = await _context.Employees.FindAsync(id);
                 if (employee == null)
                 {
-                    _logger.Warn($"Employee with ID {id} not found");
+                    _logger.Warn(this, $"Employee with ID {id} not found");
                     return NotFound();
                 }
 
@@ -267,7 +316,7 @@ namespace myappmvc.Controllers
                 await _context.SaveChangesAsync();
                 await _cache.RemoveAsync("employee_list");
 
-                _logger.Info($"Employee with ID {id} deleted");
+                _logger.Info(this, $"Employee with ID {id} deleted");
 
                 return Ok(new EmployeeDTO
                 {
@@ -279,9 +328,13 @@ namespace myappmvc.Controllers
             }
             catch (Exception ex)
             {
-                _logger.Error($"Error deleting employee with ID {id}", ex);
+                _logger.Error(this, $"Error deleting employee with ID {id}", ex);
                 return StatusCode(500, "Internal server error");
             }
         }
+    }
+    public class MyClass
+    {
+        public int id { get; set; }
     }
 }
